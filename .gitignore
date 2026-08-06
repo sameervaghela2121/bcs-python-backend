@@ -1,0 +1,164 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# =========================
+# Virtual Environments
+# =========================
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+
+# =========================
+# Jupyter Notebook
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Python Packaging
+# =========================
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# IDEs
+# =========================
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Testing
+# =========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# =========================
+# Type Checking
+# =========================
+.mypy_cache/
+.pyre/
+.pytype/
+
+# =========================
+# Linting
+# =========================
+.ruff_cache/
+
+# =========================
+# Cython
+# =========================
+cython_debug/
+
+# =========================
+# Model Checkpoints
+# (Remove if you want to
+# version your models)
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pb
+*.tflite
+
+# =========================
+# ML Outputs
+# =========================
+runs/
+wandb/
+mlruns/
+tensorboard/
+events.out.tfevents.*
+
+# =========================
+# Temporary Files
+# =========================
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.orig
+
+# =========================
+# Cached Data
+# =========================
+.cache/
+.cache-loader/
+
+# =========================
+# Local Databases
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Generated Reports
+# =========================
+coverage.xml
+*.prof
+
+# =========================
+# Streamlit
+# =========================
+.streamlit/secrets.toml
+
+# =========================
+# FastAPI
+# =========================
+*.pid
+
+# =========================
+# YOLO Training Outputs
+# =========================
+*.pt
+runs/
+datasets/.cache/

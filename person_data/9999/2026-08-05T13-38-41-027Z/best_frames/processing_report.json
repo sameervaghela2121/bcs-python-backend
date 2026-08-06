@@ -1,0 +1,78 @@
+{
+  "timestamp": "2026-08-05T19:09:02.452548",
+  "person_id": "9999",
+  "total_frames_captured": 238,
+  "best_frames_selected": 5,
+  "top_frames": [
+    {
+      "path": "person_data/9999/2026-08-05T13-38-41-027Z/raw_frames/frame_0002_20260805_190844_921.jpg",
+      "filename": "frame_0002_20260805_190844_921.jpg",
+      "scores": {
+        "brightness": 99.94,
+        "contrast": 41.04,
+        "sharpness": 100,
+        "person_confidence": 0,
+        "person_size": 0,
+        "person_centering": 0
+      },
+      "overall_score": 32.05,
+      "person_detected": false
+    },
+    {
+      "path": "person_data/9999/2026-08-05T13-38-41-027Z/raw_frames/frame_0119_20260805_190851_755.jpg",
+      "filename": "frame_0119_20260805_190851_755.jpg",
+      "scores": {
+        "brightness": 99.98,
+        "contrast": 41.1,
+        "sharpness": 100,
+        "person_confidence": 0,
+        "person_size": 0,
+        "person_centering": 0
+      },
+      "overall_score": 32.05,
+      "person_detected": false
+    },
+    {
+      "path": "person_data/9999/2026-08-05T13-38-41-027Z/raw_frames/frame_0120_20260805_190851_801.jpg",
+      "filename": "frame_0120_20260805_190851_801.jpg",
+      "scores": {
+        "brightness": 99.97,
+        "contrast": 41.09,
+        "sharpness": 100,
+        "person_confidence": 0,
+        "person_size": 0,
+        "person_centering": 0
+      },
+      "overall_score": 32.05,
+      "person_detected": false
+    },
+    {
+      "path": "person_data/9999/2026-08-05T13-38-41-027Z/raw_frames/frame_0003_20260805_190844_967.jpg",
+      "filename": "frame_0003_20260805_190844_967.jpg",
+      "scores": {
+        "brightness": 99.82,
+        "contrast": 41.14,
+        "sharpness": 100,
+        "person_confidence": 0,
+        "person_size": 0,
+        "person_centering": 0
+      },
+      "overall_score": 32.04,
+      "person_detected": false
+    },
+    {
+      "path": "person_data/9999/2026-08-05T13-38-41-027Z/raw_frames/frame_0001_20260805_190844_873.jpg",
+      "filename": "frame_0001_20260805_190844_873.jpg",
+      "scores": {
+        "brightness": 99.94,
+        "contrast": 40.92,
+        "sharpness": 100,
+        "person_confidence": 0,
+        "person_size": 0,
+        "person_centering": 0
+      },
+      "overall_score": 32.04,
+      "person_detected": false
+    }
+  ]
+}
