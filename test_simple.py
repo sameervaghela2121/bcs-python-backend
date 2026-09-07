@@ -4,12 +4,13 @@ Simple Test:
 - Call 1: Capture person_001 (creates folder 1)
 - Call 2: Capture person_001 again (creates folder 2, same person!)
 - Verify: Each call creates new timestamped folder
+- Camera sources come from .env (CAM1_SOURCE, CAM2_SOURCE, ...)
 """
 
 import json
 import time
 from pathlib import Path
-from person_capture import capture_person_api
+from person_capture import capture_person_api, load_camera_sources
 
 
 def main():
@@ -17,18 +18,14 @@ def main():
     print("SIMPLE TEST: Two API Calls, Same Person, Different Folders")
     print("="*70 + "\n")
 
-    # Test with webcam (camera index 0)
-    # Or use RTSP: "rtsp://sam_trt:Admin@123@10.134.80.84:554/stream1"
-    camera_source = "rtsp://sam_trt:Admin@123@192.168.0.47:554/stream1"
+    cameras = load_camera_sources()
+    print(f"📷 Cameras loaded from .env: {cameras}\n")
 
     # ═══════════════════════════════════════════════════════════════════
     print("📞 CALL 1: person_001 (First time)")
     print("─" * 70)
 
-    result1 = capture_person_api(
-        person_id="person_001",
-        camera_source=camera_source
-    )
+    result1 = capture_person_api(person_id="person_001")
 
     print(f"Status: {result1['status']}")
     print(f"Folder: {result1['directories']['best_frames']}")
@@ -39,16 +36,13 @@ def main():
     # ═══════════════════════════════════════════════════════════════════
     # Wait before second call (let first one finish)
     print("⏳ Waiting for first capture + postprocessing...\n")
-    time.sleep(50)  # 10s capture + 40s postprocessing
+    time.sleep(50)  # 15s capture + postprocessing per camera
 
     # ═══════════════════════════════════════════════════════════════════
     print("📞 CALL 2: person_001 (Second time, SAME person)")
     print("─" * 70)
 
-    result2 = capture_person_api(
-        person_id="person_001",
-        camera_source=camera_source
-    )
+    result2 = capture_person_api(person_id="person_001")
 
     print(f"Status: {result2['status']}")
     print(f"Folder: {result2['directories']['best_frames']}")
@@ -67,11 +61,11 @@ def main():
 
     print("✅ Call 1 Folder:")
     print(f"   {call1_folder}")
-    print(f"   Best frames: {list((call1_folder / 'best_frames').glob('best_*.jpg'))}")
+    print(f"   Best frames: {list((call1_folder / 'best_frames').glob('*_best_*.jpg'))}")
 
     print("\n✅ Call 2 Folder:")
     print(f"   {call2_folder}")
-    print(f"   Best frames: {list((call2_folder / 'best_frames').glob('best_*.jpg'))}")
+    print(f"   Best frames: {list((call2_folder / 'best_frames').glob('*_best_*.jpg'))}")
 
     print("\n" + "="*70)
     print("RESULTS")
@@ -86,18 +80,18 @@ def main():
         print("✗ ERROR: Same folder used twice!")
 
     # Check if best_frames exist
-    best1_count = len(list((call1_folder / 'best_frames').glob('best_*.jpg')))
-    best2_count = len(list((call2_folder / 'best_frames').glob('best_*.jpg')))
+    best1_count = len(list((call1_folder / 'best_frames').glob('*_best_*.jpg')))
+    best2_count = len(list((call2_folder / 'best_frames').glob('*_best_*.jpg')))
 
     print(f"\n✓ Call 1: {best1_count} best frames saved")
     print(f"✓ Call 2: {best2_count} best frames saved")
 
-    # Check if raw frames deleted
-    raw1_exists = (call1_folder / 'raw_frames').exists()
-    raw2_exists = (call2_folder / 'raw_frames').exists()
-
-    print(f"\n✓ Call 1: Raw frames deleted = {not raw1_exists}")
-    print(f"✓ Call 2: Raw frames deleted = {not raw2_exists}")
+    # Check if each camera's raw frames were deleted
+    for camera_id in cameras:
+        raw1_exists = (call1_folder / f'{camera_id}_raw_frames').exists()
+        raw2_exists = (call2_folder / f'{camera_id}_raw_frames').exists()
+        print(f"\n✓ Call 1 [{camera_id}]: Raw frames deleted = {not raw1_exists}")
+        print(f"✓ Call 2 [{camera_id}]: Raw frames deleted = {not raw2_exists}")
 
     # Check for processing report
     report1 = call1_folder / 'best_frames' / 'processing_report.json'
@@ -106,14 +100,14 @@ def main():
     if report1.exists():
         with open(report1) as f:
             data1 = json.load(f)
-        print(f"\n✓ Call 1 Report: {data1['total_frames_captured']} frames analyzed")
+        print(f"\n✓ Call 1 Report cameras: {list(data1['cameras'].keys())}")
     else:
         print(f"\n✗ Call 1: No report found")
 
     if report2.exists():
         with open(report2) as f:
             data2 = json.load(f)
-        print(f"✓ Call 2 Report: {data2['total_frames_captured']} frames analyzed")
+        print(f"✓ Call 2 Report cameras: {list(data2['cameras'].keys())}")
     else:
         print(f"✗ Call 2: No report found")
 
@@ -125,14 +119,14 @@ def main():
 Summary:
   ✓ Call 1 created folder: {timestamp1}
   ✓ Call 2 created folder: {timestamp2} (NEW!)
-  ✓ Each with own best_frames/
-  ✓ Raw frames auto-deleted
-  ✓ Processing reports saved
+  ✓ Each with own best_frames/ (namespaced per camera)
+  ✓ Each camera's raw frames auto-deleted independently
+  ✓ Processing report merged across cameras
   ✓ API returned immediately both times
 
 This shows:
   - Multithreading works (each call independent)
-  - Capture + postprocessing in background
+  - Per-camera capture + postprocessing in background
   - Each call gets unique folder
   - Multiple calls don't interfere
 """.format(

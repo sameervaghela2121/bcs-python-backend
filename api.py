@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-FastAPI Server with UUID-based folder naming
+FastAPI Server - Multi-camera person capture
 Run with: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 
 - Endpoint: POST /api/capture
-- Parameters: person_id, trigger_at
-- Folder naming: {person_id}_{uuid4}/raw_frames + best_frames
+- Parameters: person_id, trigger_at (camera sources come from .env, not the request)
+- Folder naming: {person_id}/{timestamp}/cam<N>_raw_frames + best_frames
 """
 
 from fastapi import FastAPI, HTTPException
@@ -42,7 +42,6 @@ app.add_middleware(
 class CaptureRequest(BaseModel):
     person_id: str
     trigger_at: Optional[str] = None  # ISO format timestamp (for reference)
-    camera_source: Optional[str] = "0"  # Camera index or RTSP URL
 
 
 
@@ -56,11 +55,13 @@ async def capture(request: CaptureRequest):
     """
     Start capture for a person
 
+    Camera source is not part of the request - it is read from the
+    CAMERA_SOURCE environment variable (see .env).
+
     Request:
     {
         "person_id": "person_001",
-        "trigger_at": "2024-08-03T21:30:45.123456",  (optional)
-        "camera_source": "rtsp://..."  (optional, default: "0")
+        "trigger_at": "2024-08-03T21:30:45.123456"  (optional)
     }
 
     Response:
@@ -79,7 +80,6 @@ async def capture(request: CaptureRequest):
 
     result = capture_person_api(
         person_id=request.person_id,
-        camera_source=request.camera_source or "0",
         trigger_at=request.trigger_at
     )
 
@@ -109,7 +109,7 @@ async def list_folders():
         if person_folder.is_dir():
             for timestamp_folder in person_folder.glob("*"):
                 if timestamp_folder.is_dir():
-                    best_frames = len(list((timestamp_folder / "best_frames").glob("best_*.jpg")))
+                    best_frames = len(list((timestamp_folder / "best_frames").glob("*_best_*.jpg")))
                     folders.append({
                         "person_id": person_folder.name,
                         "timestamp": timestamp_folder.name,
@@ -161,7 +161,7 @@ API Endpoints:
 Example:
   curl -X POST http://{network_ip}:{PORT}/api/capture \\
     -H "Content-Type: application/json" \\
-    -d '{{"person_id": "person_001", "camera_source": "0"}}'
+    -d '{{"person_id": "person_001"}}'
 
 ═══════════════════════════════════════════════════════════════════
     """)

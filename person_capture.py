@@ -1,37 +1,65 @@
 #!/usr/bin/env python3
 """
 Person Detection & Frame Processing Service
-Multithreaded - Capture & Postprocessing in background
+Multi-camera, multithreaded - Capture & Postprocessing in background
 API returns immediately after starting capture
 
 Workflow:
-1. API Call starts CaptureWorker thread (10 seconds)
-2. API returns immediately
-3. Capture finishes → Queues PostprocessWorker thread
-4. Postprocessing runs in background (analyze, select best, delete raw)
-5. Each call creates new timestamped folder
-6. Multiple people processed in parallel
+1. Camera sources are loaded from env (CAM1_SOURCE, CAM2_SOURCE, ...)
+2. API call starts one CaptureWorker thread per camera (parallel)
+3. API returns immediately
+4. Each camera's capture finishes independently → queues its own PostprocessWorker
+5. Each PostprocessWorker analyzes only its own camera's frames, selects best,
+   deletes that camera's raw frames, and merges its results into the shared report
+6. Each call creates a new timestamped folder shared by all cameras
+7. Multiple people processed in parallel
 """
 
 import cv2
 import os
+import re
 import json
 import time
 import threading
 import shutil
 from pathlib import Path
 from datetime import datetime
-import numpy as np
+import numpy as np 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
 from typing import Dict, Optional
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(threadName)-12s] - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")
+CAM_SOURCE_PATTERN = re.compile(r"^CAM(\d+)_SOURCE$")
+
+
+def load_camera_sources() -> Dict[str, str]:
+    """
+    Load camera sources from env vars shaped CAM1_SOURCE, CAM2_SOURCE, ...
+    Each value is either a webcam index ("0") or an RTSP URL.
+
+    Falls back to a single camera ("cam1") using CAMERA_SOURCE if no
+    CAM<N>_SOURCE vars are set.
+    """
+    numbered = {}
+    for key, value in os.environ.items():
+        match = CAM_SOURCE_PATTERN.match(key)
+        if match and value:
+            numbered[int(match.group(1))] = value
+
+    if numbered:
+        return {f"cam{n}": src for n, src in sorted(numbered.items())}
+
+    return {"cam1": DEFAULT_CAMERA_SOURCE}
 
 
 class FrameProcessor:
@@ -45,7 +73,7 @@ class FrameProcessor:
             try:
                 from ultralytics import YOLO
                 logger.info("Loading YOLOv8...")
-                self.model = YOLO("yolov8n.pt", verbose=False)
+                self.model = YOLO("yolov8n.pt")
                 logger.info("✓ YOLOv8 loaded")
             except Exception as e:
                 logger.warning(f"YOLOv8 failed: {e}")
@@ -67,7 +95,7 @@ class FrameProcessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         laplacian = cv2.Laplacian(gray, cv2.CV_64F)
         sharpness = np.var(laplacian)
-        score = min(100, (sharpness / 500) * 100)
+        score = min(100, (sharpness / 1500) * 100)
         return score
 
     def detect_persons(self, frame):
@@ -138,10 +166,10 @@ class FrameProcessor:
         person_confidence = detections[0]['confidence'] * 100 if detections else 0
 
         overall_score = (
-            person_confidence * 0.30 +
-            person_size * 0.20 +
-            sharpness * 0.20 +
-            person_center * 0.15 +
+            sharpness * 0.30 +
+            person_size * 0.25 +
+            person_confidence * 0.20 +
+            person_center * 0.10 +
             brightness * 0.10 +
             contrast * 0.05
         )
@@ -162,29 +190,73 @@ class FrameProcessor:
         }
 
 
-class CaptureWorker(threading.Thread):
-    """Thread: Captures frames for 10 seconds and queues postprocessing"""
+class SharedReport:
+    """
+    Thread-safe, incrementally-written report shared by all cameras of a
+    single capture_person() call. Each camera's PostprocessWorker merges its
+    own results in independently, as soon as it finishes - it does not wait
+    for the other cameras.
+    """
 
-    def __init__(self, person_id: str, raw_dir: Path, best_dir: Path, camera_source: str,
-                 processor: FrameProcessor, duration: int = 10, fps: int = 30):
-        super().__init__(daemon=False, name=f"Capture-{person_id}")
+    def __init__(self, path: Path, person_id: str, cameras: Dict[str, str]):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {
+            'person_id': person_id,
+            'started_at': datetime.now().isoformat(),
+            'cameras_requested': list(cameras.keys()),
+            'cameras': {}
+        }
+        self._write()
+
+    def _write(self):
+        with open(self.path, 'w') as f:
+            json.dump(self.data, f, indent=2)
+
+    def update_camera(self, camera_id: str, camera_source: str, camera_result: Dict):
+        with self.lock:
+            self.data['cameras'][camera_id] = {
+                'camera_source': camera_source,
+                **camera_result
+            }
+            self.data['last_updated'] = datetime.now().isoformat()
+            self._write()
+
+
+class CaptureWorker(threading.Thread):
+    """Thread: Captures frames from one camera and queues its own postprocessing"""
+
+    def __init__(self, person_id: str, camera_id: str, camera_source: str,
+                 raw_dir: Path, best_dir: Path, processor: FrameProcessor,
+                 shared_report: SharedReport, duration: int = 10, fps: int = 30):
+        super().__init__(daemon=False, name=f"Capture-{person_id}-{camera_id}")
         self.person_id = person_id
+        self.camera_id = camera_id
+        self.camera_source = camera_source
         self.raw_dir = raw_dir
         self.best_dir = best_dir
-        self.camera_source = camera_source
         self.processor = processor
+        self.shared_report = shared_report
         self.duration = duration
         self.fps = fps
         self.frame_count = 0
 
     def run(self):
-        logger.info(f"🎬 CAPTURE START: {self.person_id}")
+        logger.info(f"🎬 CAPTURE START: {self.person_id} [{self.camera_id} -> {self.camera_source}]")
 
-        cap = cv2.VideoCapture(self.camera_source if self.camera_source.startswith("")
-                              else int(self.camera_source))
+        try:
+            cap = cv2.VideoCapture(
+                int(self.camera_source) if self.camera_source.isdigit() else self.camera_source
+            )
+        except Exception as e:
+            logger.error(f"❌ [{self.camera_id}] Error opening camera source '{self.camera_source}': {e}")
+            self._fail(f"Error opening camera source: {e}")
+            return
 
         if not cap.isOpened():
-            logger.error(f"❌ Cannot open: {self.camera_source}")
+            logger.error(f"❌ [{self.camera_id}] Cannot open camera source: {self.camera_source}")
+            cap.release()
+            self._fail("Cannot open camera source")
             return
 
         start_time = time.time()
@@ -193,7 +265,7 @@ class CaptureWorker(threading.Thread):
             while time.time() - start_time < self.duration:
                 ret, frame = cap.read()
                 if not ret:
-                    logger.warning(f"Failed to read frame")
+                    logger.warning(f"[{self.camera_id}] Failed to read frame")
                     break
 
                 self.frame_count += 1
@@ -205,56 +277,93 @@ class CaptureWorker(threading.Thread):
 
                 if self.frame_count % 30 == 0:
                     elapsed = time.time() - start_time
-                    logger.debug(f"  [{self.person_id}] Frame {self.frame_count} ({elapsed:.1f}s)")
+                    logger.debug(f"  [{self.camera_id}] Frame {self.frame_count} ({elapsed:.1f}s)")
 
                 time.sleep(1 / self.fps)
 
-            logger.info(f"✓ CAPTURE END: {self.person_id} - {self.frame_count} frames")
+            logger.info(f"✓ CAPTURE END: {self.person_id} [{self.camera_id}] - {self.frame_count} frames")
 
-            # Start postprocessing in background
+            # Start this camera's postprocessing independently in the background.
+            # A failure/empty result here only affects this camera - other cameras'
+            # threads are unaffected and keep running.
             if self.frame_count > 0:
                 self._start_postprocessing()
+            else:
+                logger.error(f"❌ [{self.camera_id}] No frames captured")
+                self._fail("No frames captured")
 
         except Exception as e:
-            logger.error(f"Capture error: {e}")
+            logger.error(f"[{self.camera_id}] Capture error: {e}")
+            self._fail(f"Capture error: {e}")
 
         finally:
             cap.release()
 
     def _start_postprocessing(self):
-        """Start postprocessing in background thread"""
+        """Start postprocessing for this camera in its own background thread"""
         worker = PostprocessWorker(
             person_id=self.person_id,
+            camera_id=self.camera_id,
+            camera_source=self.camera_source,
             raw_dir=self.raw_dir,
             best_dir=self.best_dir,
-            processor=self.processor
+            processor=self.processor,
+            shared_report=self.shared_report
         )
         worker.start()
 
+    def _fail(self, reason: str):
+        """Record this camera's failure in the shared report and clean up its
+        (empty or partial) raw folder. Does not affect any other camera."""
+        self.shared_report.update_camera(self.camera_id, self.camera_source, {
+            'status': 'error',
+            'error': reason,
+            'total_frames_captured': self.frame_count,
+            'best_frames_selected': 0,
+            'top_frames': []
+        })
+        try:
+            if self.raw_dir.exists():
+                shutil.rmtree(self.raw_dir)
+        except Exception as e:
+            logger.error(f"[{self.camera_id}] Cleanup error: {e}")
+
 
 class PostprocessWorker(threading.Thread):
-    """Thread: Analyzes frames and selects best ones (background)"""
+    """Thread: Analyzes one camera's frames, selects best ones, merges into shared report"""
 
-    def __init__(self, person_id: str, raw_dir: Path, best_dir: Path, processor: FrameProcessor, num_best: int = 5):
-        super().__init__(daemon=False, name=f"Postprocess-{person_id}")
+    def __init__(self, person_id: str, camera_id: str, camera_source: str, raw_dir: Path,
+                 best_dir: Path, processor: FrameProcessor, shared_report: SharedReport,
+                 num_best: int = 3):
+        super().__init__(daemon=False, name=f"Postprocess-{person_id}-{camera_id}")
         self.person_id = person_id
+        self.camera_id = camera_id
+        self.camera_source = camera_source
         self.raw_dir = raw_dir
         self.best_dir = best_dir
         self.processor = processor
+        self.shared_report = shared_report
         self.num_best = num_best
 
     def run(self):
-        logger.info(f"📊 POSTPROCESS START: {self.person_id}")
+        logger.info(f"📊 POSTPROCESS START: {self.person_id} [{self.camera_id}]")
 
         try:
             jpg_files = sorted(list(self.raw_dir.glob("*.jpg")))
 
             if not jpg_files:
-                logger.warning(f"No frames for {self.person_id}")
+                logger.warning(f"No frames for {self.person_id} [{self.camera_id}]")
+                self.shared_report.update_camera(self.camera_id, self.camera_source, {
+                    'status': 'error',
+                    'error': 'No frames captured',
+                    'total_frames_captured': 0,
+                    'best_frames_selected': 0,
+                    'top_frames': []
+                })
                 self._cleanup()
                 return
 
-            logger.info(f"  Analyzing {len(jpg_files)} frames...")
+            logger.info(f"  [{self.camera_id}] Analyzing {len(jpg_files)} frames...")
 
             analysis_results = []
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -263,47 +372,74 @@ class PostprocessWorker(threading.Thread):
                     for jpg_file in jpg_files
                 }
 
-                completed = 0
                 for future in as_completed(futures):
-                    completed += 1
                     result = future.result()
                     if result:
                         analysis_results.append(result)
 
             if not analysis_results:
-                logger.warning(f"No valid frames for {self.person_id}")
+                logger.warning(f"No valid frames for {self.person_id} [{self.camera_id}]")
+                self.shared_report.update_camera(self.camera_id, self.camera_source, {
+                    'status': 'error',
+                    'error': 'No valid frames after analysis',
+                    'total_frames_captured': len(jpg_files),
+                    'best_frames_selected': 0,
+                    'top_frames': []
+                })
                 self._cleanup()
                 return
 
-            analysis_results.sort(key=lambda x: x['overall_score'], reverse=True)
+            # Only rank/select frames where a person was actually detected -
+            # a sharp, well-lit empty frame must never outrank a real person frame.
+            person_frames = [r for r in analysis_results if r['person_detected']]
 
-            # Select and copy best frames
-            num_best = min(self.num_best, len(analysis_results))
-            logger.info(f"  Selecting {num_best} best frames...")
+            if not person_frames:
+                logger.warning(f"No person detected in any frame for {self.person_id} [{self.camera_id}]")
+                self.shared_report.update_camera(self.camera_id, self.camera_source, {
+                    'status': 'no_person_detected',
+                    'error': 'No frames with a detected person',
+                    'total_frames_captured': len(jpg_files),
+                    'frames_analyzed': len(analysis_results),
+                    'best_frames_selected': 0,
+                    'top_frames': []
+                })
+                self._cleanup()
+                return
 
-            for rank, result in enumerate(analysis_results[:num_best], 1):
+            person_frames.sort(key=lambda x: x['overall_score'], reverse=True)
+
+            # Select and copy best frames, namespaced by camera
+            num_best = min(self.num_best, len(person_frames))
+            logger.info(f"  [{self.camera_id}] Selecting {num_best} best frames...")
+
+            for rank, result in enumerate(person_frames[:num_best], 1):
                 source_path = Path(result['path'])
-                dest_path = self.best_dir / f"best_{rank:02d}_{result['filename']}"
+                dest_path = self.best_dir / f"{self.camera_id}_best_{rank:02d}_{result['filename']}"
 
                 if source_path.exists():
                     shutil.copy2(source_path, dest_path)
-                    logger.info(f"    [{rank}] Score: {result['overall_score']:.2f}")
+                    logger.info(f"    [{self.camera_id}][{rank}] Score: {result['overall_score']:.2f}")
 
-            # Save report
-            report_path = self.best_dir / "processing_report.json"
-            with open(report_path, 'w') as f:
-                json.dump({
-                    'timestamp': datetime.now().isoformat(),
-                    'person_id': self.person_id,
-                    'total_frames_captured': len(jpg_files),
-                    'best_frames_selected': num_best,
-                    'top_frames': analysis_results[:num_best]
-                }, f, indent=2)
+            self.shared_report.update_camera(self.camera_id, self.camera_source, {
+                'status': 'ok',
+                'total_frames_captured': len(jpg_files),
+                'frames_analyzed': len(analysis_results),
+                'frames_with_person': len(person_frames),
+                'best_frames_selected': num_best,
+                'top_frames': person_frames[:num_best]
+            })
 
-            logger.info(f"✓ POSTPROCESS END: {self.person_id}")
+            logger.info(f"✓ POSTPROCESS END: {self.person_id} [{self.camera_id}]")
 
         except Exception as e:
-            logger.error(f"Postprocess error: {e}")
+            logger.error(f"[{self.camera_id}] Postprocess error: {e}")
+            self.shared_report.update_camera(self.camera_id, self.camera_source, {
+                'status': 'error',
+                'error': f'Postprocess error: {e}',
+                'total_frames_captured': len(list(self.raw_dir.glob("*.jpg"))) if self.raw_dir.exists() else 0,
+                'best_frames_selected': 0,
+                'top_frames': []
+            })
 
         finally:
             self._cleanup()
@@ -312,15 +448,16 @@ class PostprocessWorker(threading.Thread):
         try:
             if self.raw_dir.exists():
                 shutil.rmtree(self.raw_dir)
-                logger.info(f"  🗑️  Deleted raw frames")
+                logger.info(f"  🗑️  [{self.camera_id}] Deleted raw frames ({self.raw_dir.name})")
         except Exception as e:
-            logger.error(f"Cleanup error: {e}")
+            logger.error(f"[{self.camera_id}] Cleanup error: {e}")
 
 
 class PersonCaptureProcessor:
-    """Main service - Multithreaded capture and postprocessing"""
+    """Main service - Multi-camera, multithreaded capture and postprocessing"""
 
-    def __init__(self, base_dir: str = "person_data", capture_duration: int = 15):
+    def __init__(self, base_dir: str = "person_data", capture_duration: int = 15
+    ):
         self.base_dir = Path(base_dir)
         self.capture_duration = capture_duration
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -329,41 +466,70 @@ class PersonCaptureProcessor:
         logger.info(f"PersonCaptureProcessor initialized")
         logger.info(f"  Base dir: {self.base_dir}")
 
-    def capture_person(self, person_id: str, camera_source: str = "0", trigger_at: Optional[str] = None) -> Dict:
+    def capture_person(self, person_id: str, trigger_at: Optional[str] = None) -> Dict:
         """
-        Start capture for a person (returns immediately)
-        Capture and postprocessing run in background threads
+        Start capture for a person across all configured cameras (returns immediately)
+        Capture and postprocessing run per-camera in background threads
         """
         logger.info(f"\n{'='*70}")
         logger.info(f"🔴 API CALL: person_id={person_id}")
         logger.info(f"{'='*70}")
 
         try:
+            cameras = load_camera_sources()
+            logger.info(f"📷 Cameras: {cameras}")
+
             # Use the trigger_at value from the request as-is for the folder name (falls back to now if missing)
             timestamp = trigger_at if trigger_at else datetime.now().strftime("%Y%m%d_%H%M%S")
             person_dir = self.base_dir / f"{person_id}" / timestamp
 
-            raw_dir = person_dir / "raw_frames"
             best_dir = person_dir / "best_frames"
-
-            raw_dir.mkdir(parents=True, exist_ok=True)
             best_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info(f"📁 Folder: {person_dir.name}")
 
-            # Start capture thread
-            capture_thread = CaptureWorker(
+            shared_report = SharedReport(
+                path=best_dir / "processing_report.json",
                 person_id=person_id,
-                raw_dir=raw_dir,
-                best_dir=best_dir,
-                camera_source=camera_source,
-                processor=self.processor,
-                duration=self.capture_duration
+                cameras=cameras
             )
-            capture_thread.start()
+
+            # Each camera is set up and started independently - if one camera
+            # fails to start (bad folder permissions, etc.) it's recorded in
+            # the shared report and the rest still start normally.
+            camera_raw_dirs = {}
+            started_cameras = []
+            for camera_id, camera_source in cameras.items():
+                try:
+                    raw_dir = person_dir / f"{camera_id}_raw_frames"
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    camera_raw_dirs[camera_id] = str(raw_dir)
+
+                    capture_thread = CaptureWorker(
+                        person_id=person_id,
+                        camera_id=camera_id,
+                        camera_source=camera_source,
+                        raw_dir=raw_dir,
+                        best_dir=best_dir,
+                        processor=self.processor,
+                        shared_report=shared_report,
+                        duration=self.capture_duration
+                    )
+                    capture_thread.start()
+                    started_cameras.append(camera_id)
+
+                except Exception as e:
+                    logger.error(f"❌ [{camera_id}] Failed to start capture: {e}")
+                    shared_report.update_camera(camera_id, camera_source, {
+                        'status': 'error',
+                        'error': f'Failed to start capture: {e}',
+                        'total_frames_captured': 0,
+                        'best_frames_selected': 0,
+                        'top_frames': []
+                    })
 
             # Return immediately (don't wait for capture to finish)
-            logger.info(f"✅ API RESPONSE: Capture started in background")
+            logger.info(f"✅ API RESPONSE: Capture started in background for {len(started_cameras)}/{len(cameras)} camera(s)")
             logger.info(f"{'='*70}\n")
 
             return {
@@ -371,8 +537,10 @@ class PersonCaptureProcessor:
                 'person_id': person_id,
                 'message': 'Capturing - processing in background',
                 'timestamp': datetime.now().isoformat(),
+                'cameras': list(cameras.keys()),
                 'directories': {
-                    'best_frames': str(best_dir)
+                    'best_frames': str(best_dir),
+                    'raw_frames': camera_raw_dirs
                 }
             }
 
@@ -396,23 +564,26 @@ def get_service(base_dir: str = "person_data") -> PersonCaptureProcessor:
     return _service
 
 
-def capture_person_api(person_id: str, camera_source: str = "0", trigger_at: Optional[str] = None) -> Dict:
+def capture_person_api(person_id: str, trigger_at: Optional[str] = None) -> Dict:
     """Simple API function - returns immediately"""
     service = get_service()
-    return service.capture_person(person_id, camera_source, trigger_at)
+    return service.capture_person(person_id, trigger_at)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Person Capture Processor (Multithreaded)")
+    parser = argparse.ArgumentParser(description="Person Capture Processor (Multi-camera, Multithreaded)")
     parser.add_argument("person_id", type=str, help="Person ID")
-    parser.add_argument("--source", type=str, default="0", help="Camera source (index or RTSP URL)")
+    parser.add_argument(
+        "--trigger-at", type=str, default=None,
+        help="Optional ISO timestamp used as the folder name (defaults to now)"
+    )
 
     args = parser.parse_args()
 
     service = get_service()
-    result = service.capture_person(args.person_id, args.source)
+    result = service.capture_person(args.person_id, args.trigger_at)
 
     print("\n" + "="*70)
     print("RESPONSE:")
